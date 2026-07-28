@@ -157,72 +157,83 @@ HAPPY_SERVER_URL=http://localhost:3005 ./bin/happy.mjs daemon start
 - Daemon logs are stored in `~/.happy-dev/logs/` (or `$HAPPY_HOME_DIR/logs/`)
 - Named with format: `YYYY-MM-DD-HH-MM-SS-daemon.log`
 
-# Session Forking `claude` and sdk behavior
+# Resuming vs. forking: `claude` and sdk behavior
+
+> Scope: measured 2026-07-28 against `@anthropic-ai/claude-agent-sdk@0.3.220`,
+> on the SDK path (`resume` option → `claude --resume=<id> --output-format
+> stream-json --input-format stream-json`). That is the only path handy-cli
+> takes. See the historical note at the bottom for the older `--print` finding
+> this section replaces.
 
 ## Commands Run
 
-### Initial Session
+### Live session, resumed by the SDK
 ```bash
-claude --print --output-format stream-json --verbose 'list files in this directory'
+claude --resume=16441779-… --output-format stream-json --input-format stream-json
 ```
-- Original Session ID: `aada10c6-9299-4c45-abc4-91db9c0f935d`
-- Created file: `~/.claude/projects/.../aada10c6-9299-4c45-abc4-91db9c0f935d.jsonl`
+- Session ID passed in: `16441779-…`
+- Session ID on every line of the resumed file: `16441779-…` — **unchanged**
+- File on disk: `~/.claude/projects/.../16441779-….jsonl`, appended **in place**
+  (528490 B at 11:48 → 539071 B at 13:03)
+- No `.jsonl` under a new UUID appeared in the project directory
 
-### Resume with --resume flag
-```bash
-claude --print --output-format stream-json --verbose --resume aada10c6-9299-4c45-abc4-91db9c0f935d 'what file did we just see?'
-```
-- New Session ID: `1433467f-ff14-4292-b5b2-2aac77a808f0`
-- Created file: `~/.claude/projects/.../1433467f-ff14-4292-b5b2-2aac77a808f0.jsonl`
+## Key Findings for `--resume`
 
-## Key Findings for --resume
+**`--resume` continues in place. It does not fork.**
 
 ### 1. Session File Behavior
-- Creates a NEW session file with NEW session ID
-- Original session file remains unchanged
-- Two separate files exist after resumption
+- Appends to the EXISTING session file — no new file, no new session ID
+- The resumed UUID stays the session's identity for the rest of its life
 
-### 2. History Preservation
-- The new session file contains the COMPLETE history from the original session
-- History is prefixed at the beginning of the new file
-- Includes a summary line at the very top
+### 2. Session ID Rewriting
+- Does not happen. Every one of the 254 lines in the resumed file carried the
+  single value `sessionId: "16441779-…"`
 
-### 3. Session ID Rewriting
-- **CRITICAL FINDING**: All historical messages have their sessionId field UPDATED to the new session ID
-- Original messages from session `aada10c6-9299-4c45-abc4-91db9c0f935d` now show `sessionId: "1433467f-ff14-4292-b5b2-2aac77a808f0"`
-- This creates a unified session history under the new ID
+### 3. Summary Line
+- No `{"type":"summary",...}` line is inserted on resume
 
-### 4. Message Structure in New File
-```
-Line 1: Summary of previous conversation
-Lines 2-6: Complete history from original session (with updated session IDs)
-Lines 7-8: New messages from current interaction
-```
+### 4. Context Preservation
+- Unchanged from the older note: full context is preserved and the resumed
+  session behaves as one continuous conversation
 
-### 5. Context Preservation
-- Claude successfully maintains full context
-- Can answer questions about previous interactions
-- Behaves as if it's a continuous conversation
+## `forkSession: true` — the other semantics
 
-## Technical Details
+The new-file / new-ID / rewritten-history behavior is what
+`QueryOptions.forkSession` (`sdk.d.ts:1500`) buys:
 
-### Original Session File Structure
-- Contains only messages from the original session
-- All messages have original session ID
-- Remains untouched after resume
+> "When true, resumed sessions will fork to a new session ID rather than
+> continuing the previous session. Use with `resume`."
 
-### New Session File Structure After Resume
-```json
-{"type":"summary","summary":"Listing directory files in current location","leafUuid":"..."}
-{"parentUuid":null,"sessionId":"1433467f-ff14-4292-b5b2-2aac77a808f0","message":{"role":"user","content":[{"type":"text","text":"list files in this directory"}]},...}
-// ... all historical messages with NEW session ID ...
-{"parentUuid":"...","sessionId":"1433467f-ff14-4292-b5b2-2aac77a808f0","message":{"role":"user","content":"what file did we just see?"},...}
-```
+**handy-cli never sets it.** `src/claude/claudeRemote.ts:129` passes only
+`resume: startFrom ?? undefined`, so `forkSession` takes its default of
+`false` — always continue-in-place. (Not to be confused with our own
+`forkSession()` in `src/claude/utils/claudeSessionFork.ts`, which is a
+filesystem operation; `apiMachine.ts` imports it aliased as
+`claudeForkSession` for exactly that reason.)
 
 ## Implications for handy-cli
 
-When using --resume:
-1. Must handle new session ID in responses
-2. Original session remains as historical record
-3. All context preserved but under new session identity
-4. Session ID in stream-json output will be the new one, not the resumed one
+1. The session ID in stream-json output after a resume **equals the one passed
+   in**. There is no ID change to detect or map downstream.
+2. The source file is **appended to** — it is not a frozen historical record.
+   Anything reading it must tolerate concurrent growth.
+3. "New session, old context" therefore requires copying the JSONL **at the
+   filesystem level first**. That is what
+   `src/claude/utils/claudeSessionFork.ts` is for. Its `copyFile` is load
+   bearing: without it, `--resume` on the fork would append into the parent
+   session's JSONL.
+4. That copy is verbatim (`claudeSessionFork.ts:71`) — inline `sessionId`
+   values are **not** rewritten to the new UUID, and the fork still resumes
+   correctly. So Claude locates a session by **filename**; the `sessionId`
+   field inside each line is not what it keys on.
+
+## Historical Note
+
+An earlier revision of this section claimed the opposite: that `--resume`
+created a new file under a new ID, prefixed the full history with a summary
+line, and rewrote every historical `sessionId`. That was measured on an older
+Claude release using `claude --print --resume <id> '<prompt>'`, and that exact
+command was **not** re-run for the 2026-07-28 check. The findings above are
+scoped to the SDK path — the only one handy-cli exercises. If you need the
+`--print` behavior, re-measure it rather than assuming either description
+applies.
