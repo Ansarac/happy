@@ -61,7 +61,7 @@ describe('PermissionHandler', () => {
             'Bash',
             { command: 'pwd' },
             mode,
-            { signal: controller.signal, toolUseID: 'toolu_yolo' },
+            { signal: controller.signal, toolUseID: 'toolu_yolo', requestId: 'ctrl_req_yolo' },
         );
 
         expect(result).toMatchObject({ behavior: 'allow' });
@@ -79,7 +79,7 @@ describe('PermissionHandler', () => {
             'Write',
             { file_path: '/tmp/x', content: 'y' },
             mode,
-            { signal: controller.signal, toolUseID: 'toolu_bypass' },
+            { signal: controller.signal, toolUseID: 'toolu_bypass', requestId: 'ctrl_req_bypass' },
         );
 
         expect(result).toMatchObject({ behavior: 'allow' });
@@ -105,7 +105,7 @@ describe('PermissionHandler', () => {
             'Bash',
             { command: 'pwd' },
             mode,
-            { signal: controller.signal, toolUseID: 'toolu_main' },
+            { signal: controller.signal, toolUseID: 'toolu_main', requestId: 'ctrl_req_main' },
         );
 
         expect(getState().requests.toolu_main).toMatchObject({
@@ -123,17 +123,20 @@ describe('PermissionHandler', () => {
         const firstController = new AbortController();
         const secondController = new AbortController();
 
+        // Two separate control_request envelopes, so distinct requestIds, even
+        // though the sub-agents collide on toolUseID. The handler keys off
+        // agentID + toolUseID rather than requestId, which is what this asserts.
         const firstPending = handler.handleToolCall(
             'Bash',
             { command: 'pwd' },
             mode,
-            { signal: firstController.signal, toolUseID: 'toolu_shared', agentID: 'agent-a' },
+            { signal: firstController.signal, toolUseID: 'toolu_shared', agentID: 'agent-a', requestId: 'ctrl_req_agent_a' },
         );
         const secondPending = handler.handleToolCall(
             'Bash',
             { command: 'whoami' },
             mode,
-            { signal: secondController.signal, toolUseID: 'toolu_shared', agentID: 'agent-b' },
+            { signal: secondController.signal, toolUseID: 'toolu_shared', agentID: 'agent-b', requestId: 'ctrl_req_agent_b' },
         );
 
         expect(getState().requests).toMatchObject({
@@ -192,7 +195,7 @@ describe('PermissionHandler', () => {
             'Bash',
             { command: 'pwd' },
             mode,
-            { signal: controller.signal, toolUseID: 'toolu_result', agentID: 'agent-a' },
+            { signal: controller.signal, toolUseID: 'toolu_result', agentID: 'agent-a', requestId: 'ctrl_req_result' },
         );
 
         await getPermissionResponseHandler(handlers)({
