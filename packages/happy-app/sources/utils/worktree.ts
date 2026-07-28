@@ -10,6 +10,13 @@ export const WORKTREE_DIR = '.dev/worktree';
 /** Absolute path marker used to detect worktree paths */
 export const WORKTREE_PATH_MARKER = `/${WORKTREE_DIR}/`;
 
+/**
+ * Debounce applied to a path before it is used to look up worktrees, so that
+ * typing a path doesn't fire a `git worktree list` RPC at the daemon on every
+ * keystroke (including for half-typed paths that cannot exist yet).
+ */
+export const WORKTREE_PATH_DEBOUNCE_MS = 300;
+
 // --- Name generation ---
 
 const adjectives = [
