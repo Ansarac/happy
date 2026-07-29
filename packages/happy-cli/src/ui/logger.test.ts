@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { inspect } from 'node:util';
-import { redactSecrets } from './logger';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Logger, redactSecrets } from './logger';
 
 /**
  * Structurally a JWT so the redaction patterns see what they would see in
@@ -129,5 +132,24 @@ describe('redactSecrets', () => {
         const result = redactSecrets(line);
         expect(Date.now() - started).toBeLessThan(2000);
         expect(result).toBe(line);
+    });
+});
+
+/**
+ * Redaction keeps credentials out of the log file; the file mode keeps
+ * everything else out of a co-tenant's reach. The two were fixed separately
+ * because a one-off `chmod` does not survive the next session — every process
+ * creates its own timestamped log, so the mode has to come from the open(2).
+ */
+describe('log file permissions', () => {
+    it('creates the log file readable only by the owner', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'happy-logger-'));
+        const path = join(dir, 'session.log');
+
+        new Logger(path).debug('anything at all');
+
+        // 0o777 masks off the file-type bits that statSync reports in `mode`.
+        expect(statSync(path).mode & 0o777).toBe(0o600);
+        rmSync(dir, { recursive: true, force: true });
     });
 });

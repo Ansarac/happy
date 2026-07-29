@@ -80,7 +80,9 @@ function getSessionLogPath(): string {
   return join(configuration.logsDir, filename)
 }
 
-class Logger {
+// Exported for tests, which construct one against a temp path so they can
+// assert on the created file without touching the real log directory.
+export class Logger {
   private dangerouslyUnencryptedServerLoggingUrl: string | undefined
 
   constructor(
@@ -270,7 +272,13 @@ class Logger {
     
     // Handle async file path
     try {
-      appendFileSync(this.logFilePath, logLine)
+      // `mode` applies only when this call creates the file — which is the
+      // common case, since every process logs to its own timestamped path.
+      // Without it the file lands at 0o666 & ~umask, i.e. 0644 on a default
+      // umask: world-readable, on machines that may well have other users.
+      // Redaction (redactSecrets) keeps credentials out; this keeps everything
+      // else — cwd, prompts, tool output — out of a co-tenant's reach.
+      appendFileSync(this.logFilePath, logLine, { mode: 0o600 })
     } catch (appendError) {
       if (process.env.DEBUG) {
         console.error('[DEV MODE ONLY THROWING] Failed to append to log file:', appendError)
