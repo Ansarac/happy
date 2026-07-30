@@ -76,9 +76,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # The pnpm install layer is the expensive one and only invalidates
-          # when the lockfile changes. mode=max keeps intermediate stages;
-          # GHA cache is capped at 10 GB per repo and evicts LRU, which is
-          # fine for a single image.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No build cache, deliberately. Measured on run 30517794444, the
+          # first and only cached build: 4.8 min to build and push cold,
+          # 12.7 min to export the cache afterwards (189.6s preparing,
+          # 574.0s sending). The export cost 2.6x the build it existed to
+          # accelerate, and a full cache hit could only ever save those
+          # 4.8 min. Uncached is ~6-7 min every time, with no cache-eviction
+          # variance. Revisit only if the cold build time grows a lot.
