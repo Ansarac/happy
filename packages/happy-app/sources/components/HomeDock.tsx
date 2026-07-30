@@ -28,7 +28,7 @@ import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 import { formatLastSeen, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
-import { listWorktrees } from '@/utils/worktree';
+import { listWorktrees, WORKTREE_PATH_DEBOUNCE_MS } from '@/utils/worktree';
 import type { Machine, Session } from '@/sync/storageTypes';
 import {
     getEffortLevelsForModel,
@@ -549,15 +549,33 @@ export const HomeDock = React.memo(({
         : '__none__';
     const [existingWorktrees, setExistingWorktrees] = React.useState<ModeOption[]>([]);
 
+    const resolvedSelectedPath = React.useMemo(() => {
+        return resolveAbsolutePath(selectedPath ?? '~', selectedMachine?.metadata?.homeDir);
+    }, [selectedMachine, selectedPath]);
+
+    const [debouncedResolvedSelectedPath, setDebouncedResolvedSelectedPath] = React.useState<string | null>(resolvedSelectedPath);
+
     React.useEffect(() => {
-        const path = resolveAbsolutePath(selectedPath ?? '~', selectedMachine?.metadata?.homeDir);
-        if (!supportsWorktree || !selectedMachineId || !selectedMachine || !isMachineOnline(selectedMachine) || !path) {
+        if (!resolvedSelectedPath) {
+            setDebouncedResolvedSelectedPath(null);
+            return;
+        }
+
+        const timeout = setTimeout(() => {
+            setDebouncedResolvedSelectedPath(resolvedSelectedPath);
+        }, WORKTREE_PATH_DEBOUNCE_MS);
+
+        return () => clearTimeout(timeout);
+    }, [resolvedSelectedPath]);
+
+    React.useEffect(() => {
+        if (!supportsWorktree || !selectedMachineId || !selectedMachine || !isMachineOnline(selectedMachine) || !debouncedResolvedSelectedPath) {
             setExistingWorktrees([]);
             return;
         }
 
         let cancelled = false;
-        listWorktrees(selectedMachineId, path).then((worktrees) => {
+        listWorktrees(selectedMachineId, debouncedResolvedSelectedPath).then((worktrees) => {
             if (cancelled) return;
             setExistingWorktrees(worktrees.map((worktree) => ({
                 key: worktree.path,
@@ -568,7 +586,7 @@ export const HomeDock = React.memo(({
         return () => {
             cancelled = true;
         };
-    }, [selectedMachine, selectedMachineId, selectedPath, supportsWorktree]);
+    }, [debouncedResolvedSelectedPath, selectedMachine, selectedMachineId, supportsWorktree]);
 
     React.useEffect(() => {
         if (!supportsWorktree && sessionType === 'worktree') {
