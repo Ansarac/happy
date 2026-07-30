@@ -73,12 +73,15 @@ class Configuration {
       console.log('\x1b[33m🔧 DEV MODE\x1b[0m - Data: ' + this.happyHomeDir)
     }
 
+    // 0o700 rather than the umask default of 0755: this tree holds access.key
+    // (the server credential) and the session logs. `mode` is honoured only on
+    // creation, so an existing directory keeps whatever mode it already has.
     if (!existsSync(this.happyHomeDir)) {
-      mkdirSync(this.happyHomeDir, { recursive: true })
+      mkdirSync(this.happyHomeDir, { recursive: true, mode: 0o700 })
     }
     // Ensure directories exist
     if (!existsSync(this.logsDir)) {
-      mkdirSync(this.logsDir, { recursive: true })
+      mkdirSync(this.logsDir, { recursive: true, mode: 0o700 })
     }
   }
 }

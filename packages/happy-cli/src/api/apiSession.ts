@@ -9,6 +9,7 @@ import { RawJSONLines } from '@/claude/types';
 import { randomUUID } from 'node:crypto';
 import { AsyncLock } from '@/utils/lock';
 import { deriveKey } from '@/utils/deriveKey';
+import { getSocketIoProxyAgent } from '@/utils/proxyAgent';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers';
 import { calculateCost } from '@/utils/pricing';
@@ -266,7 +267,8 @@ export class ApiSessionClient extends EventEmitter {
             reconnection: false,
             transports: ['websocket'],
             withCredentials: true,
-            autoConnect: false
+            autoConnect: false,
+            agent: getSocketIoProxyAgent(configuration.serverUrl)
         });
 
         //
