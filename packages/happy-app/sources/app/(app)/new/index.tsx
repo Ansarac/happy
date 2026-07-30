@@ -38,7 +38,7 @@ import type { NewSessionAgentType } from '@/sync/persistence';
 import { sync } from '@/sync/sync';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { machineSpawnNewSession, sessionSetAgentModes, type SessionAgentModesPatch } from '@/sync/ops';
-import { createWorktree, listWorktrees } from '@/utils/worktree';
+import { createWorktree, listWorktrees, WORKTREE_PATH_DEBOUNCE_MS } from '@/utils/worktree';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
@@ -131,7 +131,6 @@ const COMPOSER_INPUT_VERTICAL_PADDING = Platform.OS === 'web' ? 10 : 8;
 // compact cap on native mobile so the input doesn't dominate the screen.
 const COMPOSER_INPUT_MAX_HEIGHT = Platform.OS === 'web' ? 480 : 240;
 const COMPOSER_SEND_BUTTON_SIZE = 32;
-const WORKTREE_PATH_DEBOUNCE_MS = 300;
 
 function trimPathInput(path: string | null | undefined): string {
     return path?.trim() ?? '';

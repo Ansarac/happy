@@ -8,6 +8,7 @@ import { run as runRipgrep } from '@/modules/ripgrep/index';
 import { run as runDifftastic } from '@/modules/difftastic/index';
 import { RpcHandlerManager } from '../../api/rpc/RpcHandlerManager';
 import { validatePath, PathValidationResult } from './pathSecurity';
+import { validateCwd } from './cwdValidation';
 
 const execAsync = promisify(exec);
 
@@ -184,7 +185,18 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
             if (!validation.valid) {
                 return { success: false, error: validation.error };
             }
-            data.cwd = validation.resolvedPath;
+            const resolvedCwd = validation.resolvedPath ?? data.cwd;
+
+            // Allowed is not the same as present. Under the daemon checkPath is
+            // machine-scoped and never touches disk, so a half-typed path from
+            // the app's directory picker gets this far and only fails inside
+            // exec() — as `spawn /bin/sh ENOENT`, which blames the shell.
+            const existence = validateCwd(resolvedCwd);
+            if (!existence.valid) {
+                logger.debug('Shell command rejected:', existence.error);
+                return { success: false, error: existence.error };
+            }
+            data.cwd = resolvedCwd;
         }
 
         try {
