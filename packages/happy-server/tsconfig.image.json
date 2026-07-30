@@ -1,0 +1,20 @@
+// Type check scope for the Docker image build.
+//
+// Stage 2 of the root Dockerfile copies only packages/happy-wire and
+// packages/happy-server — happy-app contributes just its package.json. So the
+// builder can only check code that does not reach outside those two packages,
+// which is exactly the code the image ships.
+//
+// machinesRoutes.spec.ts imports the app's real zod schema by relative path
+// (`../../../../../happy-app/sources/sync/apiTypes`) as a deliberate
+// cross-package contract check. That is a good test, and it cannot resolve in
+// the builder. Copying happy-app/sources in to satisfy it would pull 12 MB and
+// 1115 files of an unrelated package into a server image build.
+//
+// Spec files belong in a job with the full monorepo checked out. This config
+// is not the place to check them, and excluding them here is not a claim that
+// they are checked somewhere else.
+{
+  "extends": "./tsconfig.json",
+  "exclude": ["sources/**/*.spec.ts"]
+}

@@ -37,14 +37,18 @@ COPY packages/happy-server ./packages/happy-server
 
 RUN pnpm --filter @slopus/happy-wire build
 # The package is named happy-server-self-host, not happy-server. `pnpm --filter`
-# exits 0 when nothing matches, so the previous filter silently skipped the only
-# type check this image had.
+# exits 0 when nothing matches, so the original filter here silently skipped the
+# only type check this image had.
 #
-# `typecheck`, not `build`: build is `typecheck && node scripts/build-runtime.cjs`,
-# and build-runtime.cjs shells out to `bun`, which is not in this image. Its
-# bundle would be dead weight anyway — the runtime CMD runs sources/standalone.ts
-# through tsx, not the bundle.
-RUN pnpm --filter happy-server-self-host typecheck
+# `typecheck:image`, not `build`: build is `typecheck && node
+# scripts/build-runtime.cjs`, and build-runtime.cjs shells out to `bun`, which is
+# not in this image. Its bundle would be dead weight anyway — the runtime CMD
+# runs sources/standalone.ts through tsx, not the bundle.
+#
+# `:image` excludes spec files, because only happy-wire and happy-server are
+# copied above and one spec imports across into happy-app. See
+# packages/happy-server/tsconfig.image.json.
+RUN pnpm --filter happy-server-self-host typecheck:image
 
 # Stage 3: runtime
 FROM node:20-slim AS runner

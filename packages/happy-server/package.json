@@ -31,6 +31,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "typecheck:image": "tsc --noEmit -p tsconfig.image.json",
     "build": "pnpm run typecheck && node scripts/build-runtime.cjs",
     "build:runtime": "node scripts/build-runtime.cjs",
     "bundle:webapp": "node ../happy-cli/scripts/bundle-webapp.cjs --out-dir webapp",
