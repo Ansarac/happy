@@ -36,7 +36,15 @@ COPY packages/happy-wire ./packages/happy-wire
 COPY packages/happy-server ./packages/happy-server
 
 RUN pnpm --filter @slopus/happy-wire build
-RUN pnpm --filter happy-server build
+# The package is named happy-server-self-host, not happy-server. `pnpm --filter`
+# exits 0 when nothing matches, so the previous filter silently skipped the only
+# type check this image had.
+#
+# `typecheck`, not `build`: build is `typecheck && node scripts/build-runtime.cjs`,
+# and build-runtime.cjs shells out to `bun`, which is not in this image. Its
+# bundle would be dead weight anyway — the runtime CMD runs sources/standalone.ts
+# through tsx, not the bundle.
+RUN pnpm --filter happy-server-self-host typecheck
 
 # Stage 3: runtime
 FROM node:20-slim AS runner
