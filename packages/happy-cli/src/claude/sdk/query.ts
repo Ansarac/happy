@@ -8,6 +8,8 @@ import type { QueryOptions, QueryPrompt, SDKMessage } from './types'
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ensureLocalProxyBypass } from '../utils/proxyBypass'
 import { resolveHappyEntrypoint } from './happyEntrypoint'
+import { applyOneMillionContext } from './oneMillionContext'
+import { configuration } from '@/configuration'
 
 /**
  * Wraps the official SDK query() with our QueryOptions adapter
@@ -32,8 +34,10 @@ export function query(params: { prompt: QueryPrompt; options?: QueryOptions }): 
         cwd: opts?.cwd,
         resume: opts?.resume,
         continue: opts?.continue,
-        model: opts?.model,
-        fallbackModel: opts?.fallbackModel,
+        // Widened here rather than upstream so the app-visible model stays the
+        // key the picker knows ('sonnet', not 'sonnet[1m]'). See oneMillionContext.
+        model: applyOneMillionContext(opts?.model, configuration.disable1mContext),
+        fallbackModel: applyOneMillionContext(opts?.fallbackModel, configuration.disable1mContext),
         maxTurns: opts?.maxTurns,
         permissionMode: opts?.permissionMode,
         allowedTools: opts?.allowedTools,
