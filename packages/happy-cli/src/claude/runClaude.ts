@@ -59,7 +59,6 @@ export interface StartOptions {
 }
 
 const DEFAULT_CLAUDE_PERMISSION_MODE: PermissionMode = 'yolo';
-const DEFAULT_CLAUDE_MODEL = 'opus';
 const DEFAULT_CLAUDE_EFFORT: 'low' | 'medium' | 'high' | 'xhigh' | 'max' = 'medium';
 type ClaudeGoalCommand = NonNullable<ReturnType<typeof parseClaudeGoalActionParams>>;
 type PendingClaudeGoalAction = {
@@ -529,7 +528,14 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Forward messages to the queue
     // Permission modes: Use the unified 7-mode type, mapping happens at SDK boundary in claudeRemote.ts
     let currentPermissionMode: PermissionMode | undefined = initialPermissionMode;
-    let currentModel: string | undefined = options.model ?? DEFAULT_CLAUDE_MODEL; // Track current model state
+    // No hardcoded model default: any value we pass is forwarded to the SDK as
+    // an explicit `--model`, which overrides the Claude CLI's own default. On
+    // plans where that default is a 1M-context variant (`claude-opus-5[1m]`),
+    // pinning the bare `opus` alias silently drops the window to 200K, and the
+    // app's "default model" pick — which deliberately sends no --model
+    // (daemon/run.ts) — was landing here and getting pinned anyway. Leaving it
+    // undefined matches local PTY mode, which never passes --model either.
+    let currentModel: string | undefined = options.model; // Track current model state
     let currentFallbackModel: string | undefined = undefined; // Track current fallback model
     let currentCustomSystemPrompt: string | undefined = undefined; // Track current custom system prompt
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
