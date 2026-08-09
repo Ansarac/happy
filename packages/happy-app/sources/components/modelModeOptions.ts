@@ -100,10 +100,18 @@ export function getClaudeModelModes(): ModelMode[] {
         // CLI's alias table yet (`claude --model opus-5` errors on 2.1.199),
         // while the full ID passes straight through to the API.
         { key: 'claude-opus-5', name: 'opus 5', description: null },
-        { key: 'opus', name: 'opus 4.8', description: null },
-        { key: 'fable', name: 'fable 5', description: null },
-        { key: 'sonnet', name: 'sonnet 4.6', description: null },
-        { key: 'haiku', name: 'haiku 4.5', description: null },
+        // The bare aliases float — the CLI resolves each to the newest model of
+        // that family — so a version number here goes stale silently the next
+        // time one ships, and nothing in the app notices. That is exactly what
+        // happened: these read 'opus 4.8' and 'sonnet 4.6' long after both had
+        // moved to 5 (measured 2026-08-09 via `modelUsage.*.canonicalModel`:
+        // opus -> claude-opus-5, sonnet -> claude-sonnet-5). Name what the key
+        // means instead and let the pinned entry above be the one carrying a
+        // version.
+        { key: 'opus', name: 'opus (latest)', description: null },
+        { key: 'fable', name: 'fable (latest)', description: null },
+        { key: 'sonnet', name: 'sonnet (latest)', description: null },
+        { key: 'haiku', name: 'haiku (latest)', description: null },
     ];
 }
 

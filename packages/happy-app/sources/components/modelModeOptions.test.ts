@@ -52,7 +52,7 @@ describe('modelModeOptions', () => {
         expect(models[1].name).toBe('gpt-5.6 sol');
     });
 
-    it('builds claude model fallbacks with fable 5', () => {
+    it('builds claude model fallbacks with floating aliases', () => {
         const models = getClaudeModelModes();
         expect(models.map((model) => model.key)).toEqual([
             'default',
@@ -64,9 +64,21 @@ describe('modelModeOptions', () => {
         ]);
         expect(models.find((model) => model.key === 'fable')).toEqual({
             key: 'fable',
-            name: 'fable 5',
+            name: 'fable (latest)',
             description: null,
         });
+    });
+
+    it('keeps version numbers off the floating aliases', () => {
+        // A version on an alias goes stale the moment the CLI repoints it, and
+        // nothing fails when it does — which is how 'opus 4.8' and 'sonnet 4.6'
+        // outlived both families moving to 5. Only the pinned full-ID entry
+        // may carry a version.
+        const floating = getClaudeModelModes().filter((model) => model.key !== 'claude-opus-5');
+
+        for (const model of floating) {
+            expect(model.name).not.toMatch(/\d/);
+        }
     });
 
     it('uses code defaults for agent defaults', () => {
