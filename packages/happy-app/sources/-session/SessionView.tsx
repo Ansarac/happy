@@ -836,10 +836,19 @@ export function SessionViewLoaded({
     }, [sessionId, expImageUpload, selectedImages, clearImages]);
 
     const handleAbort = React.useCallback(() => {
-        // Mode picks live in synced metadata — clear them there, otherwise the
-        // next inbound metadata update resurrects them (#1492)
+        // Permission mode is transient state the app sets on the user's behalf
+        // — 'plan' from the auto-switch in sync.ts, 'acceptEdits' from the
+        // permission footer — so it lives in synced metadata and an abort has
+        // to clear it there, or the next inbound update resurrects it (#1492).
+        //
+        // Model and effort are not transient; they are explicit user picks, and
+        // clearing them here was collateral from treating all three as one
+        // bundle. A null mirror resolves to the agentDefaults fallback ('opus' /
+        // 'medium'), and resolveMessageModeMeta sends that fallback with the
+        // next message — so a single abort quietly pinned a max/high session to
+        // medium effort for the rest of its life.
         if (!isRig) {
-            sessionSetAgentModes(sessionId, { permissionMode: null, modelMode: null, effortLevel: null });
+            sessionSetAgentModes(sessionId, { permissionMode: null });
         }
         sessionAbort(sessionId);
     }, [sessionId, isRig]);
