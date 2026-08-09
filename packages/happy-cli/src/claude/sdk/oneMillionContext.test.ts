@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { applyOneMillionContext, supportsOneMillionContext } from './oneMillionContext'
+import { applyOneMillionContext, stripOneMillionContext, supportsOneMillionContext } from './oneMillionContext'
 
 describe('supportsOneMillionContext', () => {
     it('accepts the aliases the CLI allowlists with a [1m] form', () => {
@@ -59,5 +59,28 @@ describe('applyOneMillionContext', () => {
     it('is a no-op when disabled', () => {
         expect(applyOneMillionContext('sonnet', true)).toBe('sonnet')
         expect(applyOneMillionContext('claude-opus-5', true)).toBe('claude-opus-5')
+    })
+})
+
+describe('stripOneMillionContext', () => {
+    it('removes the suffix', () => {
+        expect(stripOneMillionContext('claude-opus-5[1m]')).toBe('claude-opus-5')
+        expect(stripOneMillionContext('sonnet[1m]')).toBe('sonnet')
+    })
+
+    it('matches the case-insensitivity of the apply side', () => {
+        expect(stripOneMillionContext('claude-opus-5[1M]')).toBe('claude-opus-5')
+    })
+
+    it('leaves an unsuffixed model untouched', () => {
+        expect(stripOneMillionContext('claude-opus-5')).toBe('claude-opus-5')
+        expect(stripOneMillionContext('haiku')).toBe('haiku')
+        expect(stripOneMillionContext('')).toBe('')
+    })
+
+    it('round-trips whatever apply produced', () => {
+        for (const model of ['opus', 'sonnet', 'fable', 'claude-opus-5', 'haiku', 'opusplan']) {
+            expect(stripOneMillionContext(applyOneMillionContext(model, false)!)).toBe(model)
+        }
     })
 })

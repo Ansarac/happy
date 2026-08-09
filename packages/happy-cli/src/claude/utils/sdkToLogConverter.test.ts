@@ -285,6 +285,49 @@ describe('SDKToLogConverter', () => {
 
             expect((logMessage as any)?.message).not.toHaveProperty('usage')
         })
+
+        // The CLI reports one model under two ids: the result keys modelUsage
+        // by the suffixed id, the assistant message says the bare one. These
+        // are the strings a real 1M session emits, measured end to end.
+        it('should stamp a 1m window despite the suffix only being on the result', () => {
+            converter.convert(resultReporting({ 'claude-opus-5[1m]': { contextWindow: 1_000_000 } }))
+
+            const logMessage = converter.convert(assistantWithUsage('claude-opus-5'))
+
+            expect((logMessage as any)?.message.usage.context_window).toBe(1_000_000)
+        })
+
+        it('should still match when neither side carries the suffix', () => {
+            converter.convert(resultReporting({ 'claude-sonnet-5': { contextWindow: 200_000 } }))
+
+            const logMessage = converter.convert(assistantWithUsage('claude-sonnet-5'))
+
+            expect((logMessage as any)?.message.usage.context_window).toBe(200_000)
+        })
+
+        it('should not let a suffixed model borrow another model\'s window', () => {
+            converter.convert(resultReporting({
+                'claude-opus-5[1m]': { contextWindow: 1_000_000 },
+                'claude-haiku-4-5': { contextWindow: 200_000 }
+            }))
+
+            const opus = converter.convert(assistantWithUsage('claude-opus-5'))
+            const haiku = converter.convert(assistantWithUsage('claude-haiku-4-5'))
+
+            expect((opus as any)?.message.usage.context_window).toBe(1_000_000)
+            expect((haiku as any)?.message.usage.context_window).toBe(200_000)
+        })
+
+        it('should follow the last window reported for a model that switched variants', () => {
+            converter.convert(resultReporting({
+                'claude-opus-5': { contextWindow: 200_000 },
+                'claude-opus-5[1m]': { contextWindow: 1_000_000 }
+            }))
+
+            const logMessage = converter.convert(assistantWithUsage('claude-opus-5'))
+
+            expect((logMessage as any)?.message.usage.context_window).toBe(1_000_000)
+        })
     })
 
     describe('Parent-child relationships', () => {
