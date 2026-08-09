@@ -69,3 +69,16 @@ export function applyOneMillionContext(model: string | undefined, disabled: bool
     }
     return `${model}${ONE_MILLION_SUFFIX}`
 }
+
+/**
+ * Drop the suffix, so an id can be compared against one that may not carry it.
+ *
+ * The CLI is asymmetric about where the suffix survives: a result message keys
+ * `modelUsage` by the suffixed id (`claude-opus-5[1m]`), while the assistant
+ * messages of that same turn report the bare id (`claude-opus-5`). Anything
+ * correlating the two has to normalize both sides first — see
+ * `SDKToLogConverter`, where matching them raw silently drops the window.
+ */
+export function stripOneMillionContext(model: string): string {
+    return model.replace(ALREADY_SUFFIXED, '')
+}
