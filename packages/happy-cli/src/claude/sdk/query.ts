@@ -8,6 +8,7 @@ import type { QueryOptions, QueryPrompt, SDKMessage } from './types'
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ensureLocalProxyBypass } from '../utils/proxyBypass'
 import { resolveHappyEntrypoint } from './happyEntrypoint'
+import { effectiveClaudeModel } from './modelCatalog'
 
 /**
  * Wraps the official SDK query() with our QueryOptions adapter
@@ -32,8 +33,17 @@ export function query(params: { prompt: QueryPrompt; options?: QueryOptions }): 
         cwd: opts?.cwd,
         resume: opts?.resume,
         continue: opts?.continue,
-        model: opts?.model,
-        fallbackModel: opts?.fallbackModel,
+        // Rewritten here rather than upstream so the app-visible model stays the
+        // key the picker knows ('sonnet', not 'sonnet[1m]'; 'claude-opus-5', not
+        // 'claude-opus-5-5'). Upgrade before widening: applyLatestOpus preserves
+        // any [1m] the picker already asked for, and the id it produces is still
+        // suffixable. The Opus 5.5 rewrite is gated on the version of the binary
+        // that will actually run this session — memoized, so the probe costs one
+        // ~17ms spawn per process. The same transform turns the catalog published
+        // to the app into codes, so a picked row runs exactly that row. See
+        // modelCatalog, latestOpus and oneMillionContext.
+        model: effectiveClaudeModel(opts?.model),
+        fallbackModel: effectiveClaudeModel(opts?.fallbackModel),
         maxTurns: opts?.maxTurns,
         permissionMode: opts?.permissionMode,
         allowedTools: opts?.allowedTools,

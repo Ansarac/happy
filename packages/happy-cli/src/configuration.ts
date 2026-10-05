@@ -28,6 +28,8 @@ class Configuration {
   public readonly isExperimentalEnabled: boolean
   public readonly disableCaffeinate: boolean
   public readonly bootHappyAgent: boolean
+  public readonly disable1mContext: boolean
+  public readonly disableOpus55: boolean
 
   constructor() {
     // Check if we're running as daemon based on process args
@@ -71,6 +73,8 @@ class Configuration {
     this.bootHappyAgent =
       ['true', '1', 'yes'].includes(process.env.HAPPY_BOOT_AGENT?.toLowerCase() || '') ||
       this.isExperimentalEnabled;
+    this.disable1mContext = ['true', '1', 'yes'].includes(process.env.HAPPY_DISABLE_1M_CONTEXT?.toLowerCase() || '');
+    this.disableOpus55 = ['true', '1', 'yes'].includes(process.env.HAPPY_DISABLE_OPUS_5_5?.toLowerCase() || '');
 
     this.currentCliVersion = packageJson.version
 
@@ -80,12 +84,15 @@ class Configuration {
       console.log('\x1b[33m🔧 DEV MODE\x1b[0m - Data: ' + this.happyHomeDir)
     }
 
+    // 0o700 rather than the umask default of 0755: this tree holds access.key
+    // (the server credential) and the session logs. `mode` is honoured only on
+    // creation, so an existing directory keeps whatever mode it already has.
     if (!existsSync(this.happyHomeDir)) {
-      mkdirSync(this.happyHomeDir, { recursive: true })
+      mkdirSync(this.happyHomeDir, { recursive: true, mode: 0o700 })
     }
     // Ensure directories exist
     if (!existsSync(this.logsDir)) {
-      mkdirSync(this.logsDir, { recursive: true })
+      mkdirSync(this.logsDir, { recursive: true, mode: 0o700 })
     }
   }
 }

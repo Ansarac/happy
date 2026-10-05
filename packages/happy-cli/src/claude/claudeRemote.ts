@@ -16,6 +16,7 @@ import { fromRateLimitEvent, windowsFromGetUsage, type UnboundRateLimit, type Us
 import type { UsageLimitWindow } from "@/api/types";
 import { pluginsFromArgs } from './utils/pluginsFromArgs';
 import { claudeProviderAuthMessage } from './utils/providerAuth';
+import { publishedClaudeCatalog, type ClaudeModelCatalog } from './sdk/modelCatalog';
 
 export async function claudeRemote(opts: {
 
@@ -47,6 +48,8 @@ export async function claudeRemote(opts: {
     onCompletionEvent?: (message: string) => void,
     onSessionReset?: () => void,
     onSDKMetadata?: (metadata: { tools?: string[]; slashCommands?: string[]; mcpServers?: { name: string; status: string }[]; skills?: string[] }) => void,
+    /** The running binary's model catalog and the active model, once per query init. */
+    onModelCatalog?: (catalog: ClaudeModelCatalog) => void,
     /** Per-turn plan rate-limit delta; the launcher merges it into agent state. */
     onUsageLimits?: (patch: UsageLimitsPatch) => void
 }) {
@@ -296,6 +299,17 @@ export async function claudeRemote(opts: {
                         mcpServers: systemInit.mcp_servers?.map(s => ({ name: s.name, status: s.status })),
                         skills: systemInit.skills,
                     });
+                }
+
+                // The binary describes its own models; publishing them lets the
+                // app show what runs instead of its hardcoded list. Not awaited:
+                // it is a control request on the live query, and a failure only
+                // leaves the app on that list, as before.
+                if (opts.onModelCatalog) {
+                    const onModelCatalog = opts.onModelCatalog;
+                    response.supportedModels()
+                        .then((rows) => onModelCatalog(publishedClaudeCatalog(rows, systemInit.model)))
+                        .catch((error) => logger.debug('[claudeRemote] supportedModels failed (ignored)', error));
                 }
 
                 // Session id is still in memory, wait until session file is written to disk

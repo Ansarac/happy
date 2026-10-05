@@ -19,6 +19,7 @@ import {
     retainReconnectCapabilityMonitor,
     shouldReconnect,
 } from '@/utils/lidState';
+import { getSocketIoProxyAgent } from '@/utils/proxyAgent';
 import { getProjectPath } from '@/claude/utils/path';
 import {
     forkSession as claudeForkSession,
@@ -499,6 +500,7 @@ export class ApiMachineClient {
             },
             path: '/v1/updates',
             reconnection: false,
+            agent: getSocketIoProxyAgent(serverUrl)
         });
 
         this.socket.on('connect', () => {
