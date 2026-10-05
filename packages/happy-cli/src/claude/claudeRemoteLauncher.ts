@@ -403,6 +403,14 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             skills: metadata.skills,
                         }));
                     },
+                    onModelCatalog: (catalog) => {
+                        logger.debug('[remote] Claude model catalog received, updating session:', catalog);
+                        session.client.updateMetadata((currentMetadata) => ({
+                            ...currentMetadata,
+                            models: catalog.models,
+                            currentModelCode: catalog.currentModelCode,
+                        }));
+                    },
                     onUsageLimits: (patch) => {
                         // Merging against currentAgentState re-hydrates window
                         // state across claudeRemote re-entries (mode switches).

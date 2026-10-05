@@ -117,6 +117,9 @@ describe('PermissionHandler', () => {
         await expect(pending).resolves.toMatchObject({ behavior: 'allow' });
     });
 
+    // Two separate control_request envelopes, so distinct requestIds, even
+    // though the sub-agents collide on toolUseID. The handler keys off
+    // agentID + toolUseID rather than requestId, which is what this asserts.
     it('uses agentID to disambiguate sub-agent permission requests with the same toolUseID', async () => {
         const { session, getState, handlers, sendSessionNotification } = createSessionMock();
         const handler = new PermissionHandler(session as any);

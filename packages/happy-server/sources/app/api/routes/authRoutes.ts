@@ -6,6 +6,21 @@ import { auth } from "@/app/auth/auth";
 import { log } from "@/utils/log";
 
 export function authRoutes(app: Fastify) {
+
+    // POST /v1/auth is both login and signup. Its signature check only proves
+    // the caller holds the matching private key — never that they were meant
+    // to have an account here — so on a reachable deployment it is an open
+    // sign-up form. 'open' is the default and is upstream's behaviour; set
+    // HAPPY_REGISTRATION=closed once your own devices are paired and the
+    // endpoint becomes login-only.
+    //
+    // An unrecognised value throws at startup rather than falling back to
+    // 'open'. A typo in a security switch must not silently disable it.
+    const registration = process.env.HAPPY_REGISTRATION ?? 'open';
+    if (registration !== 'open' && registration !== 'closed') {
+        throw new Error(`Invalid HAPPY_REGISTRATION value '${registration}'. Expected 'open' or 'closed'.`);
+    }
+
     app.post('/v1/auth', {
         schema: {
             body: z.object({
@@ -26,6 +41,17 @@ export function authRoutes(app: Fastify) {
 
         // Create or update user in database
         const publicKeyHex = privacyKit.encodeHex(publicKey);
+
+        if (registration === 'closed') {
+            const existing = await db.account.findUnique({
+                where: { publicKey: publicKeyHex },
+                select: { id: true }
+            });
+            if (!existing) {
+                return reply.code(403).send({ error: 'Registration is closed' });
+            }
+        }
+
         const user = await db.account.upsert({
             where: { publicKey: publicKeyHex },
             update: { updatedAt: new Date() },
