@@ -14,6 +14,40 @@ import { join, basename } from 'node:path'
 // Note: readDaemonState is imported lazily inside listDaemonLogFiles() to avoid
 // circular dependency: logger.ts ↔ persistence.ts
 
+const REDACTED = '[REDACTED]'
+
+/**
+ * Credentials reach the logs by accident, not by design: `logToFile` renders
+ * arbitrary arguments with `inspect(..., { depth: 5 })`, so one
+ * `logger.debug('request failed:', axiosError)` is enough to write the whole
+ * request — `Authorization` header included — to disk, and to ship it to
+ * `dangerouslyUnencryptedServerLoggingUrl` in plaintext.
+ *
+ * Scrubbing the rendered string rather than the object graph is deliberate:
+ * the string is the single chokepoint every log path funnels through, it
+ * cannot trip over circular references, getters or exotic prototypes, and it
+ * catches every shape `inspect` produces for the same header — the array form
+ * (`authorization: [ 'Authorization', 'Bearer …' ]`), the object form and the
+ * JSON form alike.
+ */
+export function redactSecrets(text: string): string {
+    return text
+        // JWTs first: this catches the token wherever it appears, including
+        // inside a Bearer prefix, and leaves the surrounding structure intact.
+        .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, REDACTED)
+        // Any remaining bearer credential that is not JWT-shaped.
+        .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, `Bearer ${REDACTED}`)
+        // Quoted secret-ish fields. The value must be quoted, so numeric
+        // look-alikes such as `output_tokens: 512` are left alone. The length
+        // is bounded rather than open-ended: an unterminated quote in a large
+        // inspect() dump would otherwise make the engine backtrack across the
+        // whole line, once per starting position.
+        .replace(
+            /(["']?\b(?:token|access_?token|refresh_?token|encryption_?key|machine_?key|private_?key|api_?key|secret|password)\b["']?\s*[:=]\s*)(["'])(?:\\.|(?!\2)[^\\]){1,4096}\2/gi,
+            `$1$2${REDACTED}$2`,
+        )
+}
+
 /**
  * Consistent date/time formatting functions
  */
@@ -46,7 +80,9 @@ function getSessionLogPath(): string {
   return join(configuration.logsDir, filename)
 }
 
-class Logger {
+// Exported for tests, which construct one against a temp path so they can
+// assert on the created file without touching the real log directory.
+export class Logger {
   private dangerouslyUnencryptedServerLoggingUrl: string | undefined
 
   constructor(
@@ -150,30 +186,45 @@ class Logger {
   }
   
   private logToConsole(level: 'debug' | 'error' | 'info' | 'warn', prefix: string, message: string, ...args: unknown[]): void {
+    // Separate path from logToFile, and normally transient — but a daemon's
+    // stdout can be redirected to a file, so it gets the same scrubbing.
+    //
+    // Object args keep their native console formatting (colors, depth) unless
+    // the rendered form actually carries a secret; only then are they swapped
+    // for a pre-rendered redacted string. Pre-rendering everything would
+    // degrade every console line to pay for the rare one that leaks.
+    const safeMessage = redactSecrets(message)
+    const safeArgs = args.map(arg => {
+      if (typeof arg === 'string') return redactSecrets(arg)
+      const rendered = inspect(arg, { depth: 5, breakLength: 120 })
+      const redacted = redactSecrets(rendered)
+      return redacted === rendered ? arg : redacted
+    })
+
     switch (level) {
       case 'debug': {
-        console.log(chalk.gray(prefix), message, ...args)
+        console.log(chalk.gray(prefix), safeMessage, ...safeArgs)
         break
       }
 
       case 'error': {
-        console.error(chalk.red(prefix), message, ...args)
+        console.error(chalk.red(prefix), safeMessage, ...safeArgs)
         break
       }
 
       case 'info': {
-        console.log(chalk.blue(prefix), message, ...args)
+        console.log(chalk.blue(prefix), safeMessage, ...safeArgs)
         break
       }
 
       case 'warn': {
-        console.log(chalk.yellow(prefix), message, ...args)
+        console.log(chalk.yellow(prefix), safeMessage, ...safeArgs)
         break
       }
 
       default: {
         this.debug('Unknown log level:', level)
-        console.log(chalk.blue(prefix), message, ...args)
+        console.log(chalk.blue(prefix), safeMessage, ...safeArgs)
         break
       }
     }
@@ -189,9 +240,9 @@ class Logger {
         body: JSON.stringify({
           timestamp: new Date().toISOString(),
           level,
-          message: `${message} ${args.map(a => 
+          message: redactSecrets(`${message} ${args.map(a =>
             typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)
-          ).join(' ')}`,
+          ).join(' ')}`),
           source: 'cli',
           platform: process.platform
         })
@@ -202,10 +253,10 @@ class Logger {
   }
 
   private logToFile(prefix: string, message: string, ...args: unknown[]): void {
-    const logLine = `${prefix} ${message} ${args.map(arg =>
+    const logLine = redactSecrets(`${prefix} ${message} ${args.map(arg =>
       typeof arg === 'string' ? arg : inspect(arg, { depth: 5, breakLength: 120 })
-    ).join(' ')}\n`
-    
+    ).join(' ')}\n`)
+
     // Send to remote server if configured
     if (this.dangerouslyUnencryptedServerLoggingUrl) {
       // Determine log level from prefix
@@ -221,7 +272,13 @@ class Logger {
     
     // Handle async file path
     try {
-      appendFileSync(this.logFilePath, logLine)
+      // `mode` applies only when this call creates the file — which is the
+      // common case, since every process logs to its own timestamped path.
+      // Without it the file lands at 0o666 & ~umask, i.e. 0644 on a default
+      // umask: world-readable, on machines that may well have other users.
+      // Redaction (redactSecrets) keeps credentials out; this keeps everything
+      // else — cwd, prompts, tool output — out of a co-tenant's reach.
+      appendFileSync(this.logFilePath, logLine, { mode: 0o600 })
     } catch (appendError) {
       if (process.env.DEBUG) {
         console.error('[DEV MODE ONLY THROWING] Failed to append to log file:', appendError)
