@@ -17,6 +17,7 @@ import { notifyDaemonSessionStarted } from '@/daemon/controlClient';
 import { initialMachineMetadata } from '@/daemon/run';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { startHookServer } from '@/claude/utils/startHookServer';
+import { verifyAgentSdkBinary } from '@/claude/utils/verifyAgentSdkBinary';
 import { generateHookSettingsFile, cleanupHookSettingsFile } from '@/claude/utils/generateHookSettings';
 import { registerKillSessionHandler } from './registerKillSessionHandler';
 import { projectPath } from '../projectPath';
@@ -851,7 +852,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     //
     // Crashes (uncaughtException / unhandledRejection) keep archiving
     // because the session is genuinely toast at that point.
-    const cleanup = async (opts: { archive?: boolean } = { archive: true }) => {
+    const cleanup = async (opts: { archive?: boolean; exitCode?: number } = {}) => {
         logger.debug(`[START] Received termination signal, cleaning up (archive=${opts.archive ?? true})...`);
 
         try {
@@ -905,7 +906,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             await remoteScanner.cleanup();
 
             logger.debug('[START] Cleanup complete, exiting');
-            process.exit(0);
+            process.exit(opts.exitCode ?? 0);
         } catch (error) {
             logger.debug('[START] Error during cleanup:', error);
             process.exit(1);
@@ -934,6 +935,25 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // want the metadata stamped — it's the user explicitly choosing to
     // retire the session, not just disconnecting.
     registerKillSessionHandler(session.rpcHandlerManager, () => cleanup({ archive: true }));
+
+    // The SDK resolves its native `claude` binary lazily, on the first query().
+    // A truncated install therefore produces a session that connects, reports
+    // healthy, and then fails identically on every single turn — which is
+    // exactly how this check came to exist. Fail once, before the user types.
+    //
+    // Deliberately after the session exists: a daemon-spawned session has no
+    // terminal to print to, so the only way the phone learns why it died is a
+    // message on the session itself.
+    const sdkBinary = verifyAgentSdkBinary();
+    if (!sdkBinary.ok) {
+        logger.debug('[START] Claude Agent SDK binary pre-flight failed', sdkBinary);
+        const lookedFor = sdkBinary.expected.map((specifier) => `  - ${specifier}`).join('\n');
+        console.error(`\n${sdkBinary.message}\n\nLooked for:\n${lookedFor}\n`);
+        session.sendSessionEvent({ type: 'message', message: sdkBinary.message });
+        await cleanup({ archive: true, exitCode: 1 });
+        return;
+    }
+    logger.debug(`[START] Claude Agent SDK binary: ${sdkBinary.execPath ?? 'check skipped'}`);
 
     // Create claude loop
     const exitCode = await loop({

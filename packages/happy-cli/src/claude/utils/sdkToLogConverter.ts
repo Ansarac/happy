@@ -13,6 +13,7 @@ import type {
     SDKResultMessage
 } from '@/claude/sdk'
 import type { RawJSONLines } from '@/claude/types'
+import { stripOneMillionContext } from '@/claude/sdk/oneMillionContext'
 import type { PermissionResponseLookup } from './permissionHandler'
 
 /**
@@ -52,6 +53,7 @@ export class SDKToLogConverter {
     private context: ConversionContext
     private responses?: PermissionResponseLookup
     private sidechainLastUUID = new Map<string, string>();
+    /** Keyed by model id with any `[1m]` suffix stripped — see withContextWindow. */
     private contextWindowByModel = new Map<string, number>();
 
     constructor(
@@ -91,13 +93,22 @@ export class SDKToLogConverter {
      * context against the account's actual limit — which varies by model and
      * plan — instead of assuming a fixed one. Left untouched when the window
      * is not known yet (the first turn of a session).
+     *
+     * Both sides of that match are normalized, because the two ids the CLI
+     * reports for one model are not the same string: the result keys
+     * `modelUsage` by `claude-opus-5[1m]` but the assistant message says
+     * `claude-opus-5`. Matched raw, a 1M session looks up a key that was never
+     * set and silently reports no window at all — worse than the 200K session
+     * it replaced, which matched by accident. Stripping collapses the two
+     * variants onto one key, so a session that switches between them keeps the
+     * window of whichever the SDK listed last.
      */
     private withContextWindow(message: any): any {
         if (!message?.usage) {
             return message
         }
         const model = typeof message.model === 'string' ? message.model : undefined
-        const contextWindow = model ? this.contextWindowByModel.get(model) : undefined
+        const contextWindow = model ? this.contextWindowByModel.get(stripOneMillionContext(model)) : undefined
         if (!contextWindow) {
             return message
         }
@@ -223,7 +234,7 @@ export class SDKToLogConverter {
                 for (const [model, usage] of Object.entries(resultMsg.modelUsage ?? {})) {
                     const contextWindow = usage?.contextWindow
                     if (typeof contextWindow === 'number' && Number.isFinite(contextWindow) && contextWindow > 0) {
-                        this.contextWindowByModel.set(model, contextWindow)
+                        this.contextWindowByModel.set(stripOneMillionContext(model), contextWindow)
                     }
                 }
                 break

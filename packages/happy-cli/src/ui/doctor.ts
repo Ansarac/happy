@@ -14,6 +14,7 @@ import { readDaemonState } from '@/persistence'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { projectPath } from '@/projectPath'
+import { verifyAgentSdkBinary } from '@/claude/utils/verifyAgentSdkBinary'
 import packageJson from '../../package.json'
 
 /**
@@ -231,6 +232,24 @@ export async function runDoctorCommand(): Promise<void> {
     console.log(`Happy CLI Version: ${chalk.green(packageJson.version)}`);
     console.log(`Platform: ${chalk.green(process.platform)} ${process.arch}`);
     console.log(`Node.js Version: ${chalk.green(process.version)}`);
+
+    // Claude Agent SDK native binary. The SDK only resolves this on the first
+    // query(), so a missing one is invisible until every turn starts failing —
+    // worth surfacing here rather than making people read a session log.
+    console.log(chalk.bold('\n🧩 Claude Agent SDK'));
+    const sdkBinary = verifyAgentSdkBinary();
+    if (!sdkBinary.ok) {
+        console.log(chalk.red('❌ Native CLI binary not found'));
+        console.log(chalk.gray(`  ${sdkBinary.message}`));
+        sdkBinary.expected.forEach((specifier) => {
+            console.log(chalk.gray(`  looked for: ${specifier}`));
+        });
+    } else if (sdkBinary.execPath === null) {
+        console.log(chalk.yellow(`⚠️  Binary check skipped (${sdkBinary.skippedBecause})`));
+    } else {
+        console.log(chalk.green('✓ Native CLI binary found'));
+        console.log(chalk.gray(`  ${sdkBinary.execPath}`));
+    }
 
     // Configuration
     console.log(chalk.bold('\n⚙️  Configuration'));
