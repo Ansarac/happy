@@ -1,6 +1,11 @@
 # Builds the standalone happy-server image (root Dockerfile: PGlite embedded
 # Postgres, local file storage, in-memory event bus — no Postgres, Redis, or
-# S3) and pushes it to GHCR for self-hosted deployments to pull.
+# S3), boots it and checks it actually works, then pushes it to GHCR for
+# self-hosted deployments to pull.
+#
+# Order is build -> report size -> test -> push. Nothing reaches GHCR that has
+# not booted, served a smoke run, survived a restart on the same volume, and
+# stopped cleanly. Pull requests run everything except the push.
 
 name: Build and Push Server Image
 
@@ -8,11 +13,13 @@ on:
   push:
     branches: [main]
     # Monorepo: a happy-app change alone should not trigger a server image
-    # rebuild. Everything listed here feeds the root Dockerfile.
+    # rebuild. Everything listed here feeds the root Dockerfile or this
+    # workflow. Keep this list identical to the pull_request one below.
     paths:
       - 'packages/happy-server/**'
       - 'packages/happy-wire/**'
       - 'Dockerfile'
+      - '.dockerignore'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -22,30 +29,94 @@ on:
       - 'patches/**'
       - 'scripts/**'
       - '.github/workflows/docker-server.yml'
+      - '.github/scripts/happy-server-smoke.mjs'
+  # Build and test only. The push steps are gated on main below, and a PR run
+  # never logs in to GHCR.
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/happy-server/**'
+      - 'packages/happy-wire/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.npmrc'
+      - 'patches/**'
+      - 'scripts/**'
+      - '.github/workflows/docker-server.yml'
+      - '.github/scripts/happy-server-smoke.mjs'
   # Path filters mean an upstream merge touching nothing above produces no
-  # image. This is the escape hatch for "rebuild anyway".
+  # image. This is the escape hatch for "rebuild anyway". Dispatching on a
+  # branch other than main builds and tests but does not push: :latest only
+  # ever moves to a main commit.
   workflow_dispatch:
+
+# PRs: a new commit supersedes the old run, so cancel it.
+# main (push and dispatch share the refs/heads/main group): never cancel a
+# run mid-push, which could leave :latest and :sha-* disagreeing. Runs
+# serialise instead. GitHub keeps at most one pending run per group, so a
+# burst of merges builds the running commit and the newest one; the commits
+# in between get no :sha- tag, which is fine — :latest ends on the newest.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
   # Suffixed because this repo also ships the CLI and the app; a bare
   # <owner>/happy image name would be ambiguous.
   IMAGE_NAME: ${{ github.repository }}-server
+  # The tag the tests run against. Lives only in the runner's docker daemon.
+  LOCAL_IMAGE: happy-server:ci
+  DATA_VOLUME: happy-server-ci-data
+  # Two containers on one volume: run 1 boots fresh, run 2 boots on run 1's
+  # data. Separate names so run 1's logs are still there when something in
+  # run 2 fails.
+  RUN1: happy-server-ci-1
+  RUN2: happy-server-ci-2
+  BASE_URL: http://127.0.0.1:3005
+  HANDY_MASTER_SECRET: ci-master-secret-not-used-in-production
+  # Regression tripwire, not a target. The slim image is expected to be well
+  # under 200 MB unpacked; 350 catches an accidental return to a full
+  # node_modules or a Debian base without flaking on small drift. Tighten
+  # once a few runs have reported the real number.
+  IMAGE_SIZE_BUDGET_MB: 350
+  # The only condition under which anything is pushed. Evaluates to the
+  # string 'true' or 'false'.
+  PUSH: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
+
+defaults:
+  run:
+    # Explicit `shell: bash` turns on -o pipefail (the implicit default is
+    # only -e). The compressed-size pipeline below depends on it.
+    shell: bash
 
 jobs:
-  build-and-push:
+  build-test-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
+      # Only the main-branch push steps use this. `permissions` cannot be
+      # conditional; see persist-credentials below for how PR runs are kept
+      # away from the token.
       packages: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Nothing here needs git credentials. Without this the token —
+          # which carries packages: write — sits in .git/config where the
+          # smoke script (PR-controlled code on PR runs) could read it.
+          persist-credentials: false
 
-      # The root Dockerfile installs the whole pnpm workspace — including
-      # happy-app's Expo dependency tree — before it reaches happy-server.
-      # That plus the build layers runs a hosted runner close to its disk
-      # limit. Drop preinstalled toolchains this build never uses.
-      # Remove this step if "no space left on device" never shows up.
+      # The builder still installs the whole pnpm workspace (node-linker is
+      # hoisted, so --filter does not narrow it): ~4 GB of node_modules,
+      # happy-app's Expo tree included. Only the final image got small; the
+      # build did not. That runs a hosted runner close to its disk limit, so
+      # drop preinstalled toolchains this build never uses. Free space after
+      # the build is printed in the size report.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
@@ -53,12 +124,6 @@ jobs:
           df -h /
 
       - uses: docker/setup-buildx-action@v4
-
-      - uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/metadata-action@v6
         id: meta
@@ -68,17 +133,33 @@ jobs:
             type=raw,value=latest
             type=sha,prefix=sha-,format=short
 
-      # No separate test job: stage 2 of the Dockerfile runs
-      # `pnpm --filter happy-server build`, which is `tsc --noEmit`. A type
-      # error fails the image build, so the gate is already here.
+      # Built once, loaded into the runner's docker daemon under both the
+      # local test tag and the final GHCR tags, then tested, then pushed
+      # with `docker push` (see "Push to GHCR"). The alternative — a second
+      # build-push-action with push: true after the tests — would rebuild
+      # from scratch, because there is no build cache (below). Loading costs
+      # one tarball export of an image this size: seconds.
+      #
+      # Whether the image type-checks is the Dockerfile's business (its build
+      # stage). This workflow adds the runtime checks that follow.
       - uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          push: false
+          tags: |
+            ${{ env.LOCAL_IMAGE }}
+            ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Provenance/SBOM attestations cannot be loaded into docker's image
+          # store and `docker push` would not carry them anyway. Turned off
+          # explicitly so the build does not depend on how buildx resolves
+          # that conflict. The pushed tag is a plain single-platform image
+          # manifest rather than an index with an "unknown/unknown" entry.
+          provenance: false
+          sbom: false
           # No build cache, deliberately. Measured on run 30517794444, the
           # first and only cached build: 4.8 min to build and push cold,
           # 12.7 min to export the cache afterwards (189.6s preparing,
@@ -86,3 +167,187 @@ jobs:
           # accelerate, and a full cache hit could only ever save those
           # 4.8 min. Uncached is ~6-7 min every time, with no cache-eviction
           # variance. Revisit only if the cold build time grows a lot.
+
+      - name: Image size report
+        run: |
+          size_bytes=$(docker image inspect -f '{{.Size}}' "$LOCAL_IMAGE")
+          size_mb=$(( size_bytes / 1000000 ))
+          # One gzip stream over the whole `docker save` tar. Registries
+          # compress per layer, so this approximates the pull size rather
+          # than matching GHCR's number exactly.
+          gz_bytes=$(docker save "$LOCAL_IMAGE" | gzip -c | wc -c)
+          gz_mb=$(( gz_bytes / 1000000 ))
+          echo "unpacked: ${size_mb} MB (${size_bytes} bytes)"
+          echo "compressed (approx): ${gz_mb} MB (${gz_bytes} bytes)"
+          echo "budget: ${IMAGE_SIZE_BUDGET_MB} MB unpacked"
+          {
+            echo "## happy-server image size"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Unpacked | **${size_mb} MB** (${size_bytes} bytes) |"
+            echo "| Compressed (gzip of \`docker save\`, approx.) | ${gz_mb} MB (${gz_bytes} bytes) |"
+            echo "| Budget (unpacked) | ${IMAGE_SIZE_BUDGET_MB} MB |"
+            echo
+            echo "### Layers"
+            echo
+            echo '```'
+            docker history --no-trunc --format 'table {{.Size}}\t{{.CreatedBy}}' "$LOCAL_IMAGE"
+            echo '```'
+            echo
+            echo "### Runner disk after build"
+            echo
+            echo '```'
+            df -h /
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "SIZE_BYTES=${size_bytes}" >> "$GITHUB_ENV"
+
+      - name: Size budget gate
+        run: |
+          budget_bytes=$(( IMAGE_SIZE_BUDGET_MB * 1000000 ))
+          if [ "$SIZE_BYTES" -gt "$budget_bytes" ]; then
+            echo "::error::Image is $(( SIZE_BYTES / 1000000 )) MB unpacked, over the ${IMAGE_SIZE_BUDGET_MB} MB budget. See the layer table in the job summary."
+            exit 1
+          fi
+          echo "Within budget: $(( SIZE_BYTES / 1000000 )) MB <= ${IMAGE_SIZE_BUDGET_MB} MB"
+
+      # The runner's preinstalled Node (>= 20 on ubuntu-latest) is enough for
+      # the smoke script, which has no dependencies. actions/setup-node would
+      # only add a download and another version pin to maintain.
+      - name: Start container (run 1, fresh volume)
+        run: |
+          node --version
+          docker volume create "$DATA_VOLUME"
+          # Registration left at the image default: run 1 checks that the
+          # default is open.
+          docker run -d --name "$RUN1" -p 3005:3005 \
+            -v "$DATA_VOLUME:/data" \
+            -e HANDY_MASTER_SECRET \
+            "$LOCAL_IMAGE"
+
+      - name: Smoke test (run 1, open registration)
+        run: |
+          node .github/scripts/happy-server-smoke.mjs "$BASE_URL" \
+            --expect-registration=open \
+            --state-file="$RUNNER_TEMP/happy-smoke-state.json"
+
+      - name: Dockerfile HEALTHCHECK reports healthy
+        run: |
+          # The first probe only fires after the HEALTHCHECK interval, so
+          # this can take a while even though the smoke run already passed.
+          for i in $(seq 1 120); do
+            status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$RUN1")
+            case "$status" in
+              healthy)
+                echo "healthy after ${i}s"
+                exit 0
+                ;;
+              none)
+                echo "::error::Image has no HEALTHCHECK"
+                exit 1
+                ;;
+              unhealthy)
+                echo "::error::HEALTHCHECK reports unhealthy"
+                docker inspect -f '{{json .State.Health}}' "$RUN1"
+                exit 1
+                ;;
+            esac
+            if [ "$(docker inspect -f '{{.State.Running}}' "$RUN1")" != "true" ]; then
+              echo "::error::Container exited (code $(docker inspect -f '{{.State.ExitCode}}' "$RUN1")) before HEALTHCHECK passed"
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::HEALTHCHECK still '${status}' after 120s"
+          docker inspect -f '{{json .State.Health}}' "$RUN1"
+          exit 1
+
+      - name: Runs as non-root
+        run: |
+          echo "image Config.User: '$(docker image inspect -f '{{.Config.User}}' "$LOCAL_IMAGE")'"
+          uid=$(docker exec "$RUN1" id -u)
+          echo "uid inside container: ${uid}"
+          if [ "$uid" = "0" ]; then
+            echo "::error::Server runs as root"
+            exit 1
+          fi
+
+      # Also a precondition for the persistence check: PGlite gets to close
+      # its data directory cleanly before run 2 opens it.
+      - name: Graceful stop (run 1)
+        run: |
+          # -t 10 pins docker's default grace period, so an image-level
+          # StopTimeout cannot widen it. Hitting it means SIGTERM was
+          # ignored (shell as PID 1 not forwarding, no handler) and docker
+          # fell back to SIGKILL.
+          start=$(date +%s%N)
+          docker stop -t 10 "$RUN1"
+          elapsed_ms=$(( ($(date +%s%N) - start) / 1000000 ))
+          code=$(docker inspect -f '{{.State.ExitCode}}' "$RUN1")
+          echo "docker stop took ${elapsed_ms} ms, exit code ${code}"
+          if [ "$elapsed_ms" -ge 9000 ]; then
+            echo "::error::docker stop took ${elapsed_ms} ms; SIGTERM is not reaching the server"
+            exit 1
+          fi
+
+      - name: Restart on same volume (run 2, registration closed)
+        run: |
+          # Same volume, new container: the smoke run below reuses run 1's
+          # keypair from the state file and asserts that account still
+          # authenticates, while new registrations are refused.
+          docker run -d --name "$RUN2" -p 3005:3005 \
+            -v "$DATA_VOLUME:/data" \
+            -e HANDY_MASTER_SECRET \
+            -e HAPPY_REGISTRATION=closed \
+            "$LOCAL_IMAGE"
+          node .github/scripts/happy-server-smoke.mjs "$BASE_URL" \
+            --expect-registration=closed \
+            --state-file="$RUNNER_TEMP/happy-smoke-state.json"
+
+      - name: Container logs
+        if: always()
+        run: |
+          for c in "$RUN1" "$RUN2"; do
+            if docker container inspect "$c" >/dev/null 2>&1; then
+              echo "::group::docker logs $c"
+              docker logs "$c" 2>&1 || true
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: Remove test containers
+        if: always()
+        run: |
+          docker rm -f "$RUN1" "$RUN2" >/dev/null 2>&1 || true
+          docker volume rm "$DATA_VOLUME" >/dev/null 2>&1 || true
+
+      # Logged in only now, and only on main: PR runs never hold a GHCR
+      # session.
+      - uses: docker/login-action@v4
+        if: env.PUSH == 'true'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushes the exact image that was tested, by the tags metadata-action
+      # computed and the build already applied. Layers upload once; the
+      # second tag is a manifest PUT. :latest goes last so it only moves
+      # once the immutable :sha- tag is in place.
+      - name: Push to GHCR
+        if: env.PUSH == 'true'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          mapfile -t tags < <(printf '%s\n' "$TAGS" | grep -v '^$' | grep -v ':latest$' || true)
+          mapfile -t latest < <(printf '%s\n' "$TAGS" | grep ':latest$' || true)
+          for tag in "${tags[@]}" "${latest[@]}"; do
+            echo "pushing ${tag}"
+            docker push "$tag"
+          done
+          {
+            echo "## Pushed"
+            echo
+            for tag in "${tags[@]}" "${latest[@]}"; do echo "- \`${tag}\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
