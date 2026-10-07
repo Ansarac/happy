@@ -78,11 +78,11 @@ env:
   RUN2: happy-server-ci-2
   BASE_URL: http://127.0.0.1:3005
   HANDY_MASTER_SECRET: ci-master-secret-not-used-in-production
-  # Regression tripwire, not a target. The slim image is expected to be well
-  # under 200 MB unpacked; 350 catches an accidental return to a full
-  # node_modules or a Debian base without flaking on small drift. Tighten
-  # once a few runs have reported the real number.
-  IMAGE_SIZE_BUDGET_MB: 350
+  # Regression tripwire, not a target. First real build (run 37601522017):
+  # 171 MB unpacked, ~60 MB compressed, of which node:20-alpine is ~136 MB.
+  # 220 leaves room for dependency drift but trips on any return to a
+  # node_modules copy or a Debian base.
+  IMAGE_SIZE_BUDGET_MB: 220
   # The only condition under which anything is pushed. Evaluates to the
   # string 'true' or 'false'.
   PUSH: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
