@@ -357,3 +357,30 @@ jobs:
           gh release edit "$ROLLING_TAG" --title "$title" \
             --notes-file "$RUNNER_TEMP/rolling-notes.md" --prerelease --latest=false
           echo "Updated [$ROLLING_TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$ROLLING_TAG) to $CLI_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+      # Each build is a ~105 MB release. Keep the newest few as pinned
+      # rollback targets and delete the rest, tag included. Ordered by the
+      # run number in the tag, not by date or base version: the base version
+      # moves with upstream, the run number only ever goes up. Only tags of
+      # exactly the cli-v<base>-ansarac.<run> shape are considered, so
+      # cli-latest and anything published by hand are never touched.
+      - name: Prune old versioned releases
+        env:
+          KEEP_VERSIONED_RELEASES: 5
+        run: |
+          mapfile -t doomed < <(
+            gh release list --limit 1000 --json tagName --jq '.[].tagName' \
+              | sed -nE 's/^(cli-v[0-9]+\.[0-9]+\.[0-9]+-ansarac\.([0-9]+))$/\2 \1/p' \
+              | sort -rn | tail -n +"$((KEEP_VERSIONED_RELEASES + 1))" | cut -d' ' -f2
+          )
+          if [[ ${#doomed[@]} -eq 0 ]]; then
+            echo "Nothing to prune (keeping the newest $KEEP_VERSIONED_RELEASES)."
+            exit 0
+          fi
+          for tag in "${doomed[@]}"; do
+            # Never the build that was just published, whatever the ordering says.
+            if [[ "$tag" == "$VERSIONED_TAG" ]]; then continue; fi
+            echo "Deleting $tag"
+            gh release delete "$tag" --cleanup-tag --yes
+          done
+          echo "Pruned ${#doomed[@]} old release(s); kept the newest $KEEP_VERSIONED_RELEASES." >> "$GITHUB_STEP_SUMMARY"

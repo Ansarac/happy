@@ -14,7 +14,7 @@ publishes it (`.github/workflows/cli-package.yml`):
 | Release | Assets | Use |
 |---|---|---|
 | `cli-latest` | `happy-cli.tgz`, `happy-cli.tgz.sha256` | Always the newest build. Stable URL. |
-| `cli-v<version>` | `happy-<version>.tgz`, `.sha256` | One per build, never changes. Pin or roll back. |
+| `cli-v<version>` | `happy-<version>.tgz`, `.sha256` | One per build, never changes. Only the newest 5 are kept; older ones are deleted by CI. Pin or roll back within that window. |
 
 Versions are `<upstream base>-ansarac.<CI run number>`, for example
 `1.2.5-ansarac.12`. Builds from source report
