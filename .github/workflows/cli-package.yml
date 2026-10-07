@@ -1,0 +1,359 @@
+# Builds this fork's happy CLI as an npm tarball and publishes it on GitHub
+# Releases, so every machine installs the same tested artifact with one
+# command instead of running from a git checkout:
+#
+#   npm install -g https://github.com/Ansarac/happy/releases/download/cli-latest/happy-cli.tgz
+#
+# Fork-only. Upstream's release-happy-cli.yml publishes `happy` to npm from
+# slopus/happy and is left untouched; this reuses its build sequence (wire
+# build -> prepublishOnly, which builds and runs the unit tests -> pnpm pack ->
+# check-package -> smoke install outside the monorepo) through
+# scripts/fork-cli-package.cjs, which wraps upstream's cli-release.cjs checks.
+#
+# Order is build -> test -> pack -> smoke (Linux, then Windows) -> publish.
+# Nothing is published that has not installed and run on both. Pull requests
+# run everything except publish, and never hold a token that can write.
+#
+# Two releases per main build, both marked prerelease and never "Latest" (see
+# the publish job for why):
+#   cli-v<version>  immutable, assets happy-<version>.tgz + .sha256
+#   cli-latest      rolling, tag moved to the newest build, assets
+#                   happy-cli.tgz + happy-cli.tgz.sha256 (stable URLs)
+
+name: CLI Package
+
+on:
+  push:
+    branches: [main]
+    # Everything that feeds the packed CLI. Keep identical to the
+    # pull_request list below.
+    paths:
+      - 'packages/happy-cli/**'
+      - 'packages/happy-wire/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      # Changes install resolution without moving pnpm-lock.yaml.
+      - '.npmrc'
+      - 'patches/**'
+      # The root postinstall, the release checks and the installer.
+      - 'scripts/**'
+      - '.github/workflows/cli-package.yml'
+      - '.github/scripts/cli-installer-smoke.mjs'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/happy-cli/**'
+      - 'packages/happy-wire/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.npmrc'
+      - 'patches/**'
+      - 'scripts/**'
+      - '.github/workflows/cli-package.yml'
+      - '.github/scripts/cli-installer-smoke.mjs'
+  # "Build anyway", e.g. after an upstream rebase that the path filter did
+  # not see. Dispatched on a branch other than main it builds and tests but
+  # does not publish: releases only ever come from main.
+  workflow_dispatch:
+
+# PRs: a new commit supersedes the old run, so cancel it.
+# main (push and dispatch share the refs/heads/main group): never cancel a run
+# mid-publish, which could leave cli-latest's tarball and checksum from
+# different builds. Runs serialise instead. GitHub keeps at most one pending
+# run per group, so a burst of merges builds the running commit and the
+# newest one; cli-latest ends on the newest.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Explicit `shell: bash` turns on -o pipefail, also on the Windows runner
+    # (Git Bash).
+    shell: bash
+
+jobs:
+  build:
+    name: Build, test, pack and smoke test (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Nothing here needs git credentials, and on PR runs the build and
+          # tests are PR-controlled code.
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Test the release helpers
+        run: node --test scripts/cli-release.test.cjs scripts/fork-cli-package.test.cjs
+
+      # <base from packages/happy-cli/package.json>-ansarac.<run number>.
+      # The run number only increases, so builds sort in order, and a re-run
+      # of a run reuses its version. Upstream's `cli-release.cjs prepare`
+      # only accepts X.Y.Z and X.Y.Z-beta.N, hence the fork wrapper.
+      - name: Compute the fork version
+        id: version
+        run: |
+          version="$(node scripts/fork-cli-package.cjs version "$GITHUB_RUN_NUMBER")"
+          echo "CLI_VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building happy@$version" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # configuration.ts imports package.json, so the version is compiled
+      # into the bundle: it must be stamped before building or
+      # `happy --version` reports the base version.
+      - name: Stamp the version before building
+        run: node scripts/fork-cli-package.cjs prepare packages/happy-cli/package.json "$CLI_VERSION"
+
+      - name: Build wire and run CLI type checks, build, and unit tests
+        run: |
+          pnpm --filter @slopus/happy-wire --fail-if-no-match build
+          pnpm --filter happy --fail-if-no-match run prepublishOnly
+
+      - name: Pack the tarball
+        run: |
+          mkdir -p release-assets "$RUNNER_TEMP/happy-unpacked"
+          pnpm --filter happy --fail-if-no-match pack --pack-destination "$GITHUB_WORKSPACE/release-assets"
+          cd release-assets
+          tarball="happy-$CLI_VERSION.tgz"
+          # Relative name inside the file, so `sha256sum -c` works on a
+          # download.
+          sha256sum "$tarball" > "$tarball.sha256"
+          cat "$tarball.sha256"
+          ls -l
+          tar -xzf "$tarball" -C "$RUNNER_TEMP/happy-unpacked"
+          node "$GITHUB_WORKSPACE/scripts/fork-cli-package.cjs" check-package "$RUNNER_TEMP/happy-unpacked/package" "$CLI_VERSION"
+
+      - name: Smoke test the packed package outside the monorepo
+        run: |
+          smoke_root="$(mktemp -d "$RUNNER_TEMP/happy-packed-smoke.XXXXXX")"
+          npm install --prefix "$smoke_root" "$GITHUB_WORKSPACE/release-assets/happy-$CLI_VERSION.tgz" --no-audit --no-fund
+          node scripts/fork-cli-package.cjs smoke "$smoke_root" "$CLI_VERSION"
+
+      # The path users take: the installer downloads from a URL, checks the
+      # .sha256 and runs `npm install -g`. Served locally, installed into a
+      # throwaway global prefix.
+      - name: Install through scripts/install-happy-cli.mjs
+        run: node .github/scripts/cli-installer-smoke.mjs release-assets "$CLI_VERSION" "$RUNNER_TEMP/installer-smoke"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: happy-cli-${{ steps.version.outputs.version }}
+          path: release-assets/*
+          if-no-files-found: error
+          # Already gzip.
+          compression-level: 0
+          retention-days: 7
+
+  # The packed tarball, not a Windows build of it: the artifact is
+  # platform-independent JS plus per-platform tool archives and optional
+  # native dependencies that npm picks at install time. This checks that the
+  # exact bytes about to be published install and run on Windows.
+  smoke-windows:
+    name: Smoke test the tarball (Windows)
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CLI_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: happy-cli-${{ needs.build.outputs.version }}
+          path: release-assets
+
+      - name: Verify the checksum
+        working-directory: release-assets
+        run: sha256sum -c "happy-$CLI_VERSION.tgz.sha256"
+
+      - name: Smoke test the packed package
+        run: |
+          # A fixed directory rather than mktemp: Git Bash's mktemp and a
+          # Windows-style $RUNNER_TEMP are not worth the risk.
+          smoke_root="$RUNNER_TEMP/happy-packed-smoke"
+          mkdir -p "$smoke_root"
+          npm install --prefix "$smoke_root" "$GITHUB_WORKSPACE/release-assets/happy-$CLI_VERSION.tgz" --no-audit --no-fund
+          node scripts/fork-cli-package.cjs smoke "$smoke_root" "$CLI_VERSION"
+          # npm's optional dependency for this platform, without which every
+          # Claude turn fails.
+          ls -d "$smoke_root/node_modules/@anthropic-ai/claude-agent-sdk-win32-x64"
+
+      # Also exercises the installer's Windows paths: npm.cmd through a
+      # shell, happy.cmd in the prefix root, PATHEXT lookup.
+      - name: Install through scripts/install-happy-cli.mjs
+        run: node .github/scripts/cli-installer-smoke.mjs release-assets "$CLI_VERSION" "$RUNNER_TEMP/installer-smoke"
+
+      - name: Run the installed happy.cmd from PowerShell
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP 'installer-smoke\prefix'
+          $env:HAPPY_HOME_DIR = Join-Path $env:RUNNER_TEMP 'happy-home-pwsh'
+          $out = & (Join-Path $prefix 'happy.cmd') --version | Out-String
+          Write-Output $out
+          if ($out -notmatch [regex]::Escape("happy version: $env:CLI_VERSION")) {
+            Write-Error "happy.cmd did not report $env:CLI_VERSION"
+            exit 1
+          }
+
+  publish:
+    name: Publish GitHub Releases
+    needs: [build, smoke-windows]
+    # Only main, only push or dispatch. Never pull_request.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # gh needs no checkout with this set. This job runs no repository code
+      # at all: it only moves verified bytes.
+      GH_REPO: ${{ github.repository }}
+      CLI_VERSION: ${{ needs.build.outputs.version }}
+      VERSIONED_TAG: cli-v${{ needs.build.outputs.version }}
+      ROLLING_TAG: cli-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: happy-cli-${{ needs.build.outputs.version }}
+          path: release-assets
+
+      - name: Verify the artifact and write release notes
+        run: |
+          cd release-assets
+          sha256sum -c "happy-$CLI_VERSION.tgz.sha256"
+          sha="$(cut -d' ' -f1 "happy-$CLI_VERSION.tgz.sha256")"
+          # Stable-name copies for cli-latest. The .sha256 names the file it
+          # sits next to.
+          mkdir -p "$RUNNER_TEMP/rolling"
+          cp "happy-$CLI_VERSION.tgz" "$RUNNER_TEMP/rolling/happy-cli.tgz.next"
+          printf '%s  happy-cli.tgz\n' "$sha" > "$RUNNER_TEMP/rolling/happy-cli.tgz.sha256.next"
+
+          download="https://github.com/$GH_REPO/releases/download"
+          commit="[\`${GITHUB_SHA:0:12}\`]($GITHUB_SERVER_URL/$GH_REPO/commit/$GITHUB_SHA)"
+          run_link="[run $GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID)"
+          {
+            echo "Fork build of the happy CLI from \`main\` at $commit ($run_link)."
+            echo
+            echo "- Version: \`$CLI_VERSION\`"
+            echo "- SHA-256: \`$sha\`"
+            echo
+            echo 'Install or upgrade (Linux, macOS, Windows):'
+            echo
+            echo '```'
+            echo "npm install -g $download/$VERSIONED_TAG/happy-$CLI_VERSION.tgz"
+            echo '```'
+            echo
+            echo "Or, verifying the checksum and stopping a running daemon first: \`node scripts/install-happy-cli.mjs --version $CLI_VERSION\`. See [docs/install-fork-cli.md]($GITHUB_SERVER_URL/$GH_REPO/blob/main/docs/install-fork-cli.md)."
+          } > "$RUNNER_TEMP/versioned-notes.md"
+          {
+            echo "Rolling release: always the newest fork build of the happy CLI from \`main\`. Currently \`$CLI_VERSION\`, built from $commit ($run_link)."
+            echo
+            echo "- SHA-256 of \`happy-cli.tgz\`: \`$sha\`"
+            echo "- Pinned copy: [$VERSIONED_TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$VERSIONED_TAG)"
+            echo
+            echo 'Install or upgrade (Linux, macOS, Windows):'
+            echo
+            echo '```'
+            echo "npm install -g $download/$ROLLING_TAG/happy-cli.tgz"
+            echo '```'
+            echo
+            echo "See [docs/install-fork-cli.md]($GITHUB_SERVER_URL/$GH_REPO/blob/main/docs/install-fork-cli.md) for the checksum-verifying installer, self-hosted servers and proxies."
+          } > "$RUNNER_TEMP/rolling-notes.md"
+
+      # Prerelease and --latest=false on both: the version is a semver
+      # prerelease, and GitHub's "Latest release" (and /releases/latest)
+      # should stay free for whatever else this repo ships (app, server).
+      # Install URLs name the cli-latest tag explicitly, so they do not need
+      # "Latest".
+      #
+      # Idempotent: a re-run finds the release and replaces its assets with
+      # the re-run's build of the same commit and version.
+      - name: Publish the versioned release
+        run: |
+          if ! gh release view "$VERSIONED_TAG" >/dev/null 2>&1; then
+            gh release create "$VERSIONED_TAG" --target "$GITHUB_SHA" \
+              --title "happy CLI $CLI_VERSION" --notes-file "$RUNNER_TEMP/versioned-notes.md" \
+              --prerelease --latest=false
+          fi
+          gh release upload "$VERSIONED_TAG" --clobber \
+            "release-assets/happy-$CLI_VERSION.tgz" "release-assets/happy-$CLI_VERSION.tgz.sha256"
+          echo "Published [$VERSIONED_TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$VERSIONED_TAG)" >> "$GITHUB_STEP_SUMMARY"
+
+      # The stable URLs must never 404 or serve a half-updated pair for
+      # longer than necessary. `gh release upload --clobber` deletes the old
+      # asset before uploading the new one (~100 MB), so instead the new
+      # files go up under *.next names first and are swapped in with a
+      # delete + rename each, two API calls apart.
+      - name: Update the rolling cli-latest release
+        run: |
+          api() { gh api -H 'Accept: application/vnd.github+json' "$@"; }
+          asset_id() { # name -> id, empty if absent
+            api "repos/$GH_REPO/releases/tags/$ROLLING_TAG" --jq ".assets[] | select(.name == \"$1\") | .id"
+          }
+          title="happy CLI latest: $CLI_VERSION"
+
+          if ! gh release view "$ROLLING_TAG" >/dev/null 2>&1; then
+            gh release create "$ROLLING_TAG" --target "$GITHUB_SHA" --title "$title" \
+              --notes-file "$RUNNER_TEMP/rolling-notes.md" --prerelease --latest=false
+          else
+            # Re-running an old run must not roll cli-latest back. The run
+            # number of the build it currently serves is in its title.
+            current="$(gh release view "$ROLLING_TAG" --json name --jq .name)"
+            current_run="$(sed -n 's/.*ansarac\.\([0-9][0-9]*\)$/\1/p' <<< "$current")"
+            if [[ -n "$current_run" && "$current_run" -gt "$GITHUB_RUN_NUMBER" ]]; then
+              echo "::notice::$ROLLING_TAG already serves run $current_run ($current); leaving it alone."
+              exit 0
+            fi
+          fi
+
+          # Leftovers from a run that failed mid-swap.
+          for name in happy-cli.tgz.next happy-cli.tgz.sha256.next; do
+            id="$(asset_id "$name")"
+            if [[ -n "$id" ]]; then api -X DELETE "repos/$GH_REPO/releases/assets/$id"; fi
+          done
+          gh release upload "$ROLLING_TAG" \
+            "$RUNNER_TEMP/rolling/happy-cli.tgz.next" "$RUNNER_TEMP/rolling/happy-cli.tgz.sha256.next"
+
+          # Move the tag to this commit. Informational only (downloads use
+          # the assets), so if the token is refused (e.g. GitHub's check on
+          # refs that move across workflow-file changes) warn and carry on.
+          if ! api -X PATCH "repos/$GH_REPO/git/refs/tags/$ROLLING_TAG" \
+                 -f sha="$GITHUB_SHA" -F force=true >/dev/null; then
+            echo "::warning::Could not move tag $ROLLING_TAG to $GITHUB_SHA; its assets are updated anyway."
+          fi
+
+          # Tarball first, then checksum. An installer that reads the
+          # checksum in between sees a mismatch and is told to retry.
+          for name in happy-cli.tgz happy-cli.tgz.sha256; do
+            old="$(asset_id "$name")"
+            new="$(asset_id "$name.next")"
+            if [[ -n "$old" ]]; then api -X DELETE "repos/$GH_REPO/releases/assets/$old"; fi
+            api -X PATCH "repos/$GH_REPO/releases/assets/$new" -f name="$name" >/dev/null
+          done
+
+          gh release edit "$ROLLING_TAG" --title "$title" \
+            --notes-file "$RUNNER_TEMP/rolling-notes.md" --prerelease --latest=false
+          echo "Updated [$ROLLING_TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$ROLLING_TAG) to $CLI_VERSION" >> "$GITHUB_STEP_SUMMARY"
