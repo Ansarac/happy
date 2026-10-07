@@ -67,3 +67,14 @@ happy codex
 - [happy-server](packages/happy-server): the relay server for encrypted sync
 
 Migrated from the `happy-coder` package. Thanks to [@franciscop](https://github.com/franciscop) for donating the `happy` package name!
+
+<!-- Fork-only block (Ansarac/happy). Kept self-contained to rebase cleanly. -->
+> **Installing this fork's CLI (Ansarac/happy).** `npm install -g happy` installs the official build. For this fork's build (Linux, macOS, Windows):
+>
+> ```bash
+> npm install -g https://github.com/Ansarac/happy/releases/download/cli-latest/happy-cli.tgz
+> # or build it from source:
+> git clone https://github.com/Ansarac/happy && cd happy && node scripts/install-happy-cli.mjs --from-source
+> ```
+>
+> See [docs/install-fork-cli.md](docs/install-fork-cli.md) for checksums, upgrades, self-hosted servers and proxies.
