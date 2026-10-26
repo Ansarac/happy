@@ -98,6 +98,16 @@ runs the `happy` you just installed (`npm prefix -g`), not an older one. Any
 daemon with its own, outside the service manager, so a unit and a `happy` on
 `PATH` at different versions keep displacing each other.
 
+Every session the daemon spawns, including those started from the phone,
+inherits the daemon's environment. To give them keys without editing the unit,
+add a drop-in and restart the daemon, e.g.
+`~/.config/systemd/user/happy-daemon.service.d/capital-stack.conf`:
+
+```ini
+[Service]
+EnvironmentFile=-%h/.config/capital-stack/env
+```
+
 Without the installer: a running daemon notices the new version and restarts
 itself on its next heartbeat, but on Windows npm may fail to replace files it
 holds open. Run `happy daemon stop` before `npm install -g` there.
