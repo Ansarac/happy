@@ -1,7 +1,8 @@
 import { startApi } from "@/app/api/api";
 import { log } from "@/utils/log";
 import { awaitShutdown, onShutdown } from "@/utils/shutdown";
-import { db } from './storage/db';
+import { db, getPGlite } from './storage/db';
+import { pgliteMaintenance } from '@/storage/pgliteMaintenance';
 import { startTimeout } from "./app/presence/timeout";
 import { startMetricsServer } from "@/app/monitoring/metrics";
 import { activityCache } from "@/app/presence/sessionCache";
@@ -15,8 +16,15 @@ async function main() {
 
     // Storage
     await db.$connect();
+    const pglite = getPGlite();
+    const maintenance = pglite ? pgliteMaintenance(pglite) : null;
     onShutdown('db', async () => {
+        await maintenance?.stop();
         await db.$disconnect();
+        // Prisma's PGlite adapter does not close the database on disconnect.
+        // close() runs Postgres' shutdown checkpoint so the next start does not
+        // have to replay WAL.
+        await pglite?.close();
     });
     onShutdown('activity-cache', async () => {
         activityCache.shutdown();
