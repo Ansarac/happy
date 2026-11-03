@@ -1,6 +1,7 @@
 import "reflect-metadata";
 
-import { db } from "./storage/db";
+import { db, getPGlite } from "./storage/db";
+import { pgliteMaintenance } from "./storage/pgliteMaintenance";
 import { initEncrypt } from "./modules/encrypt";
 import { initGithub } from "./modules/github";
 import { loadFiles } from "./storage/files";
@@ -25,8 +26,15 @@ export async function startServer(opts: StartServerOptions): Promise<{ port: num
     process.env.HANDY_MASTER_SECRET = opts.masterSecret;
 
     await db.$connect();
+    const pglite = getPGlite();
+    const maintenance = pglite ? pgliteMaintenance(pglite) : null;
     onShutdown("db", async () => {
+        await maintenance?.stop();
         await db.$disconnect();
+        // Prisma's PGlite adapter does not close the database on disconnect.
+        // close() runs Postgres' shutdown checkpoint so the next start does not
+        // have to replay WAL.
+        await pglite?.close();
     });
     onShutdown("activity-cache", async () => {
         activityCache.shutdown();
