@@ -633,25 +633,26 @@ export class ApiSessionClient extends EventEmitter {
                     maxSeq = message.seq;
                 }
 
-                if (skipRouting) continue;
+                // The socket `update` handler may have routed this seq while the request was in flight
+                if (message.seq <= this.lastReceivedSeq) continue;
 
-                if (message.content?.t !== 'encrypted') {
-                    continue;
+                if (!skipRouting && message.content?.t === 'encrypted') {
+                    try {
+                        const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(message.content.c));
+                        this.routeIncomingMessage(body);
+                    } catch (error) {
+                        logger.debug('[API] Failed to decrypt fetched message', {
+                            sessionId: this.sessionId,
+                            seq: message.seq,
+                            error
+                        });
+                    }
                 }
 
-                try {
-                    const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(message.content.c));
-                    this.routeIncomingMessage(body);
-                } catch (error) {
-                    logger.debug('[API] Failed to decrypt fetched message', {
-                        sessionId: this.sessionId,
-                        seq: message.seq,
-                        error
-                    });
-                }
+                // Advance per message so a socket update arriving mid-page is checked against it
+                this.lastReceivedSeq = message.seq;
             }
 
-            this.lastReceivedSeq = Math.max(this.lastReceivedSeq, maxSeq);
             const hasMore = !!response.data.hasMore;
             if (hasMore && maxSeq === afterSeq) {
                 logger.debug('[API] fetchMessages pagination stalled, stopping to avoid infinite loop', {
