@@ -993,6 +993,76 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(onMessage).toHaveBeenCalledWith(agentMessage);
     });
 
+    it('does not route a fetched message twice when the socket delivered it while the fetch was in flight', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+
+        const userMessage = {
+            role: 'user',
+            content: { type: 'text', text: 'first message' }
+        };
+        const encrypted = encryptContent(session, userMessage);
+
+        let resolveGet!: (value: unknown) => void;
+        mockAxiosGet.mockReturnValueOnce(new Promise((resolve) => {
+            resolveGet = resolve;
+        }));
+
+        const fetching = (client as any).fetchMessages();
+        await waitForCheck(() => expect(mockAxiosGet).toHaveBeenCalledTimes(1));
+        expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(0);
+
+        emitSocketEvent('update', createNewMessageUpdate(1, encrypted));
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+
+        resolveGet({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-1',
+                        seq: 1,
+                        content: { t: 'encrypted', c: encrypted },
+                        localId: null,
+                        createdAt: 1000,
+                        updatedAt: 1000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+        await fetching;
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect((client as any).lastReceivedSeq).toBe(1);
+    });
+
+    it('reconnect mode skips routing existing messages but still advances the cursor', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        (client as any).skipInitialMessages = true;
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [1, 2].map((seq) => ({
+                    id: `msg-${seq}`,
+                    seq,
+                    content: { t: 'encrypted', c: encryptContent(session, { role: 'user', content: { type: 'text', text: `old ${seq}` } }) },
+                    localId: null,
+                    createdAt: seq * 1000,
+                    updatedAt: seq * 1000
+                })),
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).not.toHaveBeenCalled();
+        expect((client as any).lastReceivedSeq).toBe(2);
+    });
+
     it('routes file events without logging sensitive names or refs', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onFileEvent = vi.fn();
