@@ -1,0 +1,60 @@
+name: Android Preview APK
+
+# Builds upstream's native Android preview variant (com.slopus.happy.preview,
+# "Happy (preview)") so it can be sideloaded next to the Play app and tried
+# against the self-hosted server before Play ships the same code.
+#
+# Upstream's own workflow uploads no APK, and releases ship CLI only.
+# CI has no preview key, so the APK is debug-signed with a per-runner key:
+# a newer build won't install over an older one; uninstall first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Repository to build from
+        default: slopus/happy
+      ref:
+        description: Branch, tag or commit
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: packages/happy-android
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Assemble preview
+        env:
+          HAPPY_RELEASE_WITHOUT_CALL_AGENT: '1'
+        run: ./gradlew --console=plain assemblePreview
+      - name: Name the APK after its commit
+        id: apk
+        run: |
+          sha=$(git rev-parse --short HEAD)
+          src=$(ls app/build/outputs/apk/preview/*.apk | head -1)
+          dst="app/build/outputs/apk/preview/happy-preview-${sha}.apk"
+          mv "$src" "$dst"
+          echo "name=happy-android-preview-${sha}" >> "$GITHUB_OUTPUT"
+          ls -l "$dst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: packages/happy-android/app/build/outputs/apk/preview/happy-preview-*.apk
+          retention-days: 14
